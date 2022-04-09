@@ -46,6 +46,8 @@ pub fn send_ipi(irq_num: usize) {
 }
 
 pub fn init() {
+    super::i8259_pic::init();
+
     let base_vaddr = PhysAddr::new(unsafe { xapic_base() } as usize).into_kvaddr();
     let mut lapic = LocalApicBuilder::new()
         .timer_vector(APIC_TIMER_VECTOR)
