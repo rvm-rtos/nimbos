@@ -46,6 +46,8 @@ pub fn send_ipi(irq_num: usize) {
 }
 
 pub fn init() {
+    super::i8259_pic::init();
+
     let base_vaddr = PhysAddr::new(unsafe { xapic_base() } as usize).into_kvaddr();
     let mut lapic = LocalApicBuilder::new()
         .timer_vector(APIC_TIMER_VECTOR)
@@ -55,6 +57,7 @@ pub fn init() {
         .timer_divide(TimerDivide::Div256) // divide by 1
         .timer_initial((1_000_000_000 / TICKS_PER_SEC) as u32) // FIXME: need to calibrate
         .set_xapic_base(base_vaddr.as_usize() as u64)
+        .ipi_destination_mode(x2apic::lapic::IpiDestMode::Logical) // Todo: judge whether to use physical or logical destination mode.
         .build()
         .unwrap();
     unsafe {
