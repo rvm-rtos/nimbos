@@ -9,6 +9,9 @@ use crate::config::{MMIO_REGIONS, PHYS_MEMORY_END};
 use crate::mm::{PhysAddr, VirtAddr};
 use crate::sync::LazyInit;
 
+#[cfg(feature = "rvm")]
+use crate::scf::SCF;
+
 extern "C" {
     fn stext();
     fn etext();
@@ -259,6 +262,102 @@ impl MemorySet {
     pub fn page_table_root(&self) -> PhysAddr {
         self.pt.root_paddr()
     }
+
+    
+    #[cfg(feature = "rvm")]
+    pub fn insert_sync(&mut self, area: MapArea, scf: Option<SCF>) {
+        if area.size > 0 {
+            // TODO: check overlap
+            if let Entry::Vacant(e) = self.areas.entry(area.start) {
+                self.pt.map_area_sync(e.insert(area), scf);
+            } else {
+                panic!(
+                    "MemorySet::insert: MepArea starts from {:#x?} is existed!",
+                    area.start
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "rvm")]
+    pub fn load_user_sync(&mut self, elf_data: &[u8], scf: Option<SCF>) -> (VirtAddr, VirtAddr) {
+        use xmas_elf::program::{SegmentData, Type};
+        use xmas_elf::{header, ElfFile};
+
+        let elf = ElfFile::new(elf_data).expect("invalid ELF file");
+        assert_eq!(
+            elf.header.pt2.type_().as_type(),
+            header::Type::Executable,
+            "ELF is not an executable object"
+        );
+        let expect_arch = if cfg!(target_arch = "x86_64") {
+            header::Machine::X86_64
+        } else if cfg!(target_arch = "aarch64") {
+            header::Machine::AArch64
+        } else {
+            panic!("Unsupported architecture!");
+        };
+        assert_eq!(
+            elf.header.pt2.machine().as_machine(),
+            expect_arch,
+            "invalid ELF arch"
+        );
+
+        for ph in elf.program_iter() {
+            if ph.get_type() != Ok(Type::Load) {
+                continue;
+            }
+            let vaddr = VirtAddr::new(ph.virtual_addr() as usize);
+            let offset = vaddr.page_offset();
+            let area_start = vaddr.align_down();
+            let area_end = VirtAddr::new((ph.virtual_addr() + ph.mem_size()) as usize).align_up();
+            let data = match ph.get_data(&elf).unwrap() {
+                SegmentData::Undefined(data) => data,
+                _ => panic!("failed to get ELF segment data"),
+            };
+
+            let mut flags: MemFlags = ph.flags().into();
+            if !ph.flags().is_execute() {
+                flags |= MemFlags::SYNC;
+            }
+
+            let mut area = MapArea::new_framed(
+                area_start,
+                area_end.as_usize() - area_start.as_usize(),
+                flags,
+            );
+            area.write_data(offset, data);
+            self.insert_sync(area, scf);
+            instructions::flush_icache_all();
+        }
+        // user stack
+        self.insert_sync(MapArea::new_framed(
+            VirtAddr::new(USER_STACK_BASE),
+            USER_STACK_SIZE,
+            MemFlags::READ | MemFlags::WRITE | MemFlags::USER | MemFlags::SYNC,
+        ), scf);
+
+        let entry = VirtAddr::new(elf.header.pt2.entry_point() as usize);
+        let ustack_top = VirtAddr::new(USER_STACK_BASE + USER_STACK_SIZE);
+        (entry, ustack_top)
+    }
+
+    #[cfg(feature = "rvm")]
+    pub fn clear_sync(&mut self, scf: Option<SCF>) {
+        for area in self.areas.values_mut() {
+            self.pt.unmap_area_sync(area, scf);
+        }
+        self.areas.clear();
+    }
+    
+    #[cfg(feature = "rvm")]
+    pub fn dup_sync(&self, scf: Option<SCF>) -> Self {
+        let mut ms = Self::new();
+        for area in self.areas.values() {
+            ms.insert_sync(area.dup(), scf);
+        }
+        ms
+    }
 }
 
 impl Drop for MemorySet {
@@ -327,14 +426,8 @@ pub fn init_kernel_aspace() {
     {
         use crate::config::scf::*;
         map_range(
-            phys_to_virt(SYSCALL_DATA_BUF_PADDR),
-            phys_to_virt(SYSCALL_DATA_BUF_PADDR + SYSCALL_DATA_BUF_SIZE),
-            MemFlags::READ | MemFlags::WRITE,
-            "syscall data buffer",
-        );
-        map_range(
-            phys_to_virt(SYSCALL_QUEUE_BUF_PADDR),
-            phys_to_virt(SYSCALL_QUEUE_BUF_PADDR + SYSCALL_QUEUE_BUF_SIZE),
+            phys_to_virt(SYSCALL_QUEUE_BUF_BASE_PADDR),
+            phys_to_virt(SYSCALL_QUEUE_BUF_BASE_PADDR + SYSCALL_QUEUE_BUF_SIZE * SYSCALL_MAX_SLOT_NUM),
             MemFlags::READ | MemFlags::WRITE,
             "syscall queue buffer",
         );

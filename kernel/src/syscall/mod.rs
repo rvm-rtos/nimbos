@@ -16,12 +16,14 @@ mod task;
 mod time;
 
 #[cfg(feature = "rvm")]
-use crate::scf::syscall::*;
+use crate::scf::{fs::*, task::*};
+
+#[cfg(feature = "rvm")]
+use self::task::{sys_nanosleep, sys_waitpid};
 
 #[cfg(not(feature = "rvm"))]
-use self::fs::*;
+use self::{fs::*, task::*};
 
-use self::task::*;
 use self::time::*;
 use crate::arch::{instructions, TrapFrame};
 

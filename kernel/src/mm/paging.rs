@@ -3,6 +3,9 @@ use core::{fmt::Debug, marker::PhantomData};
 
 use super::{MapArea, MemFlags, PhysAddr, PhysFrame, VirtAddr, PAGE_SIZE};
 
+#[cfg(feature = "rvm")]
+use crate::scf::SCF;
+
 pub trait GenericPTE: Debug + Clone + Copy + Sync + Send + Sized {
     // Create a page table entry point to a terminate page or block.
     fn new_page(paddr: PhysAddr, flags: MemFlags, is_block: bool) -> Self;
@@ -110,11 +113,48 @@ impl<PTE: GenericPTE> PageTableImpl<PTE> {
         }
     }
 
+    #[cfg(feature = "rvm")]
+    pub fn map_area_sync(&mut self, area: &mut MapArea, scf: Option<SCF>) {
+        let mut vaddr = area.start.as_usize();
+        let end = vaddr + area.size;
+        let sync = area.flags.contains(MemFlags::SYNC);
+        while vaddr < end {
+            let paddr = area.map(VirtAddr::new(vaddr));
+            if sync && scf.is_some() {
+                let prot = area.flags.bits & 0x7;
+                let ret = scf.unwrap().syncmap(vaddr as _, PAGE_SIZE as _, paddr.as_usize(), prot);
+                if ret != 0 {
+                    panic!("syncmap failed: addr={:x}, len={:x}, paddr={:x}, flags={:x}, ret={}", vaddr, PAGE_SIZE, paddr.as_usize(), prot, ret);
+                }
+            }
+            self.map(VirtAddr::new(vaddr), paddr, area.flags);
+            vaddr += PAGE_SIZE;
+        }
+    }
+    
     pub fn unmap_area(&mut self, area: &mut MapArea) {
         let mut vaddr = area.start.as_usize();
         let end = vaddr + area.size;
         while vaddr < end {
             area.unmap(VirtAddr::new(vaddr));
+            self.unmap(VirtAddr::new(vaddr));
+            vaddr += PAGE_SIZE;
+        }
+    }
+
+    #[cfg(feature = "rvm")]
+    pub fn unmap_area_sync(&mut self, area: &mut MapArea, scf: Option<SCF>) {
+        let mut vaddr = area.start.as_usize();
+        let end = vaddr + area.size;
+        let sync = area.flags.contains(MemFlags::SYNC);
+        while vaddr < end {
+            area.unmap(VirtAddr::new(vaddr));
+            if sync && scf.is_some() {
+                let ret = scf.unwrap().syncunmap(vaddr as _, PAGE_SIZE as _);
+                if ret != 0 {
+                    panic!("syncunmap failed: addr={:x}, len={:x}, ret={}", vaddr, PAGE_SIZE, ret);
+                }
+            }
             self.unmap(VirtAddr::new(vaddr));
             vaddr += PAGE_SIZE;
         }
